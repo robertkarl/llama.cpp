@@ -1740,17 +1740,27 @@ mtmd_image_preproc_out mtmd_image_preprocessor_inkling2v::preprocess(const clip_
     const int align = hparams.patch_size * hparams.n_merge;
     auto size = input.get_size();
     clip_image_u8 resized;
-    const bool too_large = hparams.image_max_pixels > 0 &&
-        int64_t(CLIP_ALIGN(size.width, align)) * CLIP_ALIGN(size.height, align) > hparams.image_max_pixels;
-    if (too_large) {
-        // the reference does not resize; this only bounds the number of image tokens
-        img_tool::calc_size_opt opts;
-        opts.align_size = align;
-        opts.max_pixels = hparams.image_max_pixels;
-        size = img_tool::calc_size_preserved_ratio(size, opts);
+    const int cell_area = align * align;
+    const int max_cells = std::max(1, hparams.image_max_pixels / cell_area);
+    const int min_cells = std::clamp(hparams.image_min_pixels / cell_area, 1, max_cells);
+    const int64_t cells = int64_t(CLIP_ALIGN(size.width, align) / align) * (CLIP_ALIGN(size.height, align) / align);
+    const bool resize = cells < min_cells || cells > max_cells;
+    if (resize) {
+        // Choose whole merged patches. Rounding pixel dimensions independently can
+        // overshoot the budget when the short edge is only one patch wide.
+        const int target = cells < min_cells ? min_cells : max_cells;
+        const double ratio = double(std::max(size.width, size.height)) / std::min(size.width, size.height);
+        int short_side = std::max(1, (int) std::lround(std::sqrt(target / ratio)));
+        while ((min_cells + short_side - 1) / short_side > max_cells / short_side) {
+            --short_side;
+        }
+        const int long_side = std::clamp((int) std::lround(double(target) / short_side),
+                                         (min_cells + short_side - 1) / short_side, max_cells / short_side);
+        size = size.width >= size.height ? clip_image_size{long_side * align, short_side * align}
+                                         : clip_image_size{short_side * align, long_side * align};
         img_tool::resize(input, resized, size, hparams.image_resize_algo, PAD_NONE);
     }
-    const clip_image_u8 & img = too_large ? resized : input;
+    const clip_image_u8 & img = resize ? resized : input;
     const int width  = CLIP_ALIGN(size.width,  align);
     const int height = CLIP_ALIGN(size.height, align);
     clip_image_f32 padded;

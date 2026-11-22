@@ -145,6 +145,8 @@ MTMD_API bool mtmd_decode_use_mrope(const mtmd_context * ctx);
 
 // whether the current model supports vision input
 MTMD_API bool mtmd_support_vision(const mtmd_context * ctx);
+// Whether RGBA input should be composited on the Inkling checkerboard.
+MTMD_API bool mtmd_uses_alpha_checkerboard(const mtmd_context * ctx);
 
 // whether the current model supports audio input
 MTMD_API bool mtmd_support_audio(const mtmd_context * ctx);

@@ -406,8 +406,22 @@ mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(const mtmd_context *
     // otherwise, we assume it's an image
     if (!result) {
         int nx, ny, nc;
-        auto * data = stbi_load_from_memory(buf, len, &nx, &ny, &nc, 3);
+        const bool checkerboard = !placeholder && mtmd_uses_alpha_checkerboard(ctx);
+        auto * data = stbi_load_from_memory(buf, len, &nx, &ny, &nc, checkerboard ? 4 : 3);
         if (data) {
+            if (checkerboard) {
+                // Pack RGBA into RGB in place. Source bytes stay ahead of the destination.
+                for (int y = 0; y < ny; ++y) {
+                    for (int x = 0; x < nx; ++x) {
+                        const size_t i = size_t(y) * nx + x;
+                        const int alpha = data[4*i + 3];
+                        const int bg = ((x / 8 + y / 8) % 2 == 0) ? 204 : 153;
+                        for (int c = 0; c < 3; ++c) {
+                            data[3*i + c] = (data[4*i + c] * alpha + bg * (255 - alpha) + 127) / 255;
+                        }
+                    }
+                }
+            }
             result = mtmd_bitmap_init(nx, ny, placeholder ? nullptr : data);
             mtmd_bitmap_set_id(result, id.empty() ? nullptr : id.c_str());
             stbi_image_free(data);

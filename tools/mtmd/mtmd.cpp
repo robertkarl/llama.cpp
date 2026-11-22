@@ -2194,6 +2194,10 @@ bool mtmd_decode_use_mrope(const mtmd_context * ctx) {
     return ctx->pos_type == MTMD_POS_TYPE_MROPE;
 }
 
+bool mtmd_uses_alpha_checkerboard(const mtmd_context * ctx) {
+    return ctx && ctx->proj_type_v() == PROJECTOR_TYPE_INKLING2V;
+}
+
 bool mtmd_support_vision(const mtmd_context * ctx) {
     return ctx->ctx_v != nullptr;
 }

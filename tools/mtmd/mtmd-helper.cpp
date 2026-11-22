@@ -374,6 +374,20 @@ static mtmd_bitmap * decode_webp_with_ffmpeg(const mtmd_context * mctx, const un
 static void mtmd_helper_video_set_id(mtmd_helper_video * vctx, const std::string & id);
 #endif
 
+static void composite_checkerboard(uint8_t * data, int nx, int ny) {
+    // Pack RGBA into RGB in place. Source bytes stay ahead of the destination.
+    for (int y = 0; y < ny; ++y) {
+        for (int x = 0; x < nx; ++x) {
+            const size_t i = size_t(y) * nx + x;
+            const int alpha = data[4*i + 3];
+            const int bg = ((x / 8 + y / 8) % 2 == 0) ? 204 : 153;
+            for (int c = 0; c < 3; ++c) {
+                data[3*i + c] = (data[4*i + c] * alpha + bg * (255 - alpha) + 127) / 255;
+            }
+        }
+    }
+}
+
 mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(const mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder,
                                                             mtmd_helper_init_opt opt) {
     // calculate the hash if needed
@@ -410,17 +424,7 @@ mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(const mtmd_context *
         auto * data = stbi_load_from_memory(buf, len, &nx, &ny, &nc, checkerboard ? 4 : 3);
         if (data) {
             if (checkerboard) {
-                // Pack RGBA into RGB in place. Source bytes stay ahead of the destination.
-                for (int y = 0; y < ny; ++y) {
-                    for (int x = 0; x < nx; ++x) {
-                        const size_t i = size_t(y) * nx + x;
-                        const int alpha = data[4*i + 3];
-                        const int bg = ((x / 8 + y / 8) % 2 == 0) ? 204 : 153;
-                        for (int c = 0; c < 3; ++c) {
-                            data[3*i + c] = (data[4*i + c] * alpha + bg * (255 - alpha) + 127) / 255;
-                        }
-                    }
-                }
+                composite_checkerboard(data, nx, ny);
             }
             result = mtmd_bitmap_init(nx, ny, placeholder ? nullptr : data);
             mtmd_bitmap_set_id(result, id.empty() ? nullptr : id.c_str());
@@ -617,6 +621,7 @@ struct mtmd_helper_video {
     int32_t     timestamp_interval_ms = 5000; // emit a timestamp text every N ms (0 = disabled)
     float       next_timestamp_ms     = 0.0f; // next elapsed-ms threshold at which to emit
 
+    bool alpha_checkerboard = false;
     std::vector<uint8_t> frame_buf;
     std::string pending_text; // text queued to be returned before the next frame
     bool        start_emitted = false;
@@ -702,7 +707,8 @@ struct mtmd_helper_video {
         LOG_DBG("%s: %ux%u fps=%.2f duration=%.2fs n_frames=%d\n",
                 __func__, width, height, fps_target, duration, info.n_frames);
         info.n_frames = duration > 0.0f ? (int32_t)(duration * fps_target + 0.5f) : -1;
-        frame_buf.resize((size_t)width * height * 3);
+        alpha_checkerboard = mtmd_uses_alpha_checkerboard(mctx);
+        frame_buf.resize((size_t)width * height * (alpha_checkerboard ? 4 : 3));
         return true;
     }
 
@@ -747,7 +753,7 @@ struct mtmd_helper_video {
         cmd.push_back("-f");
         cmd.push_back("rawvideo");
         cmd.push_back("-pix_fmt");
-        cmd.push_back("rgb24");
+        cmd.push_back(alpha_checkerboard ? "rgba" : "rgb24");
         cmd.push_back("pipe:1");
         cmd.push_back("-loglevel");
         cmd.push_back("error");
@@ -784,7 +790,7 @@ struct mtmd_helper_video {
         if (!sp.alive) return nullptr;
 
         FILE * fp = sp.stdout_pipe();
-        const size_t frame_size = (size_t)info.width * info.height * 3;
+        const size_t frame_size = frame_buf.size();
         LOG_DBG("%s: reading frame %d, expecting %zu bytes (%ux%u)\n",
                 __func__, current_frame, frame_size, info.width, info.height);
 
@@ -802,6 +808,7 @@ struct mtmd_helper_video {
         }
 
         LOG_DBG("%s: frame %d read OK\n", __func__, current_frame);
+        if (alpha_checkerboard) composite_checkerboard(frame_buf.data(), info.width, info.height);
         mtmd_bitmap * frame = mtmd_bitmap_init(info.width, info.height, frame_buf.data());
         mtmd_bitmap_set_mergeable(frame, true);
         if (!id.empty()) {

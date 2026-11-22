@@ -184,7 +184,7 @@ common_chat_msg_spans common_chat_msg_delimiters::split(const llama_tokens & tok
     return spans;
 }
 
-json common_chat_msg::to_json_oaicompat(bool concat_typed_text) const {
+json common_chat_msg::to_json_oaicompat(bool concat_typed_text, bool preserve_media_parts) const {
     if (!content.empty() && !content_parts.empty()) {
         throw std::runtime_error("Cannot specify both content and content_parts");
     }
@@ -194,7 +194,7 @@ json common_chat_msg::to_json_oaicompat(bool concat_typed_text) const {
     if (!content.empty()) {
         jmsg["content"] = content;
     } else if (!content_parts.empty()) {
-        if (concat_typed_text || contains_media()) {
+        if (concat_typed_text || (!preserve_media_parts && contains_media())) {
             std::string text;
             bool last_was_media_marker = false;
             // join parts with newline, do not add newline before or after media markers
@@ -570,16 +570,20 @@ struct messages_inp_normalizer {
     }
 };
 
-static json render_message_to_json(const std::vector<common_chat_msg> & msgs, const jinja::caps & c) {
+static bool uses_inkling_content_blocks(const std::string & src) {
+    return src.find("<|content_image|>") != std::string::npos && src.find("<|message_model|>") != std::string::npos;
+}
+
+static json render_message_to_json(const std::vector<common_chat_msg> & msgs, const jinja::caps & c, bool preserve_parts = false) {
     if (!c.supports_string_content && !c.supports_typed_content) {
         LOG_WRN("%s: Neither string content nor typed content is supported by the template. This is unexpected and may lead to issues.\n", __func__);
     }
 
     json messages = json::array();
     for (const auto & msg : msgs) {
-        messages.push_back(msg.to_json_oaicompat(/* concat_typed_text= */ false));
+        messages.push_back(msg.to_json_oaicompat(/* concat_typed_text= */ false, preserve_parts));
     }
-    return messages_inp_normalizer(c).normalize(messages);
+    return preserve_parts ? messages : messages_inp_normalizer(c).normalize(messages);
 }
 
 // DeepSeek V4.1 reads non-OpenAI message keys and joins content blocks with "\n\n" around images,
@@ -993,6 +997,7 @@ std::string common_chat_template_direct_apply_impl(
     json inp = json{
         {"messages", messages_override.has_value()
             ? *messages_override
+            : uses_inkling_content_blocks(tmpl.source()) ? inputs.messages
             : messages_inp_normalizer(tmpl.original_caps()).normalize(inputs.messages)},
         {"bos_token", tmpl.bos_token()},
         {"eos_token", tmpl.eos_token()},
@@ -1320,7 +1325,7 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
     }
     params.messages              = src.find("｜DSML｜ calls>") != std::string::npos ?
                                        render_message_to_json_deepseek_v4_1(*messages_to_render, tmpl.original_caps()) :
-                                       render_message_to_json(*messages_to_render, tmpl.original_caps());
+                                       render_message_to_json(*messages_to_render, caps, uses_inkling_content_blocks(src));
     params.tool_choice           = inputs.tool_choice;
     params.reasoning_format      = inputs.reasoning_format;
     params.enable_thinking       = inputs.enable_thinking;

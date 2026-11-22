@@ -988,6 +988,10 @@ static std::unique_ptr<clip_graph> clip_get_graph_builder(clip_ctx * ctx, const 
             {
                 builder = std::make_unique<clip_graph_minimax_m3>(ctx, img);
             } break;
+        case PROJECTOR_TYPE_INKLING2V:
+            {
+                builder = std::make_unique<clip_graph_inkling2v>(ctx, img);
+            } break;
         case PROJECTOR_TYPE_MUSE_GLIMMER:
             {
                 builder = std::make_unique<clip_graph_muse_glimmer>(ctx, img);
@@ -1679,6 +1683,16 @@ struct clip_model_loader {
                         // MiniMax-M3: max_pixels 451584 (=672^2) -> 576 merged tokens (image_seq_length)
                         hparams.set_limit_image_tokens(8, 576);
                         hparams.set_warmup_n_tokens(16*16);
+                    } break;
+                case PROJECTOR_TYPE_INKLING2V:
+                    {
+                        hparams.ffn_op = FFN_GELU_ERF;
+
+                        get_u32(KEY_SPATIAL_MERGE_SIZE, hparams.n_merge);
+                        if (hparams.n_merge <= 0) throw std::runtime_error("invalid Inkling 2 spatial merge size");
+                        hparams.rope_theta = 10000.0f;
+                        hparams.set_limit_image_tokens(1, 4096);
+                        hparams.set_warmup_n_tokens(32*32); // avoid OOM on warmup
                     } break;
                 case PROJECTOR_TYPE_MUSE_GLIMMER:
                     {
@@ -2497,6 +2511,18 @@ struct clip_model_loader {
                     model.mm_merger_fc1_b = get_tensor(string_format(TN_MM_MERGER_FC1, "bias"));
                     model.mm_merger_fc2_w = get_tensor(string_format(TN_MM_MERGER_FC2, "weight"));
                     model.mm_merger_fc2_b = get_tensor(string_format(TN_MM_MERGER_FC2, "bias"));
+                } break;
+            case PROJECTOR_TYPE_INKLING2V:
+                {
+                    // these come from the generic path above, where they are optional
+                    if (!model.class_embedding || !model.position_embeddings || !model.pre_ln_w || !model.pre_ln_b) {
+                        throw std::runtime_error(string_format("%s: missing class_embd, position_embd or pre_ln\n", __func__));
+                    }
+                    model.class_position_embedding = get_tensor("v.class_position_embd.weight");
+                    model.mm_1_w = get_tensor(string_format(TN_LLAVA_PROJ, 1, "weight"));
+                    model.mm_1_b = get_tensor(string_format(TN_LLAVA_PROJ, 1, "bias"), false);
+                    model.mm_2_w = get_tensor(string_format(TN_LLAVA_PROJ, 2, "weight"));
+                    model.mm_2_b = get_tensor(string_format(TN_LLAVA_PROJ, 2, "bias"), false);
                 } break;
             case PROJECTOR_TYPE_MUSE_GLIMMER:
                 {
@@ -4046,6 +4072,7 @@ int clip_n_output_tokens_x(const clip_ctx * ctx, const clip_image_f32 * img) {
         case PROJECTOR_TYPE_YOUTUVL:
         case PROJECTOR_TYPE_MUSE_GLIMMER:
             return (img->nx() / params.patch_size) / 2;
+        case PROJECTOR_TYPE_INKLING2V:
         case PROJECTOR_TYPE_STEP3VL:
             return img->nx() / (params.patch_size * params.n_merge);
         case PROJECTOR_TYPE_DEEPSEEKOCR:
@@ -4072,6 +4099,7 @@ int clip_n_output_tokens_y(const clip_ctx * ctx, const clip_image_f32 * img) {
         case PROJECTOR_TYPE_YOUTUVL:
         case PROJECTOR_TYPE_MUSE_GLIMMER:
             return (img->ny() / params.patch_size) / 2;
+        case PROJECTOR_TYPE_INKLING2V:
         case PROJECTOR_TYPE_STEP3VL:
             return img->ny() / (params.patch_size * params.n_merge);
         default:
@@ -4156,6 +4184,7 @@ int clip_n_output_tokens(const clip_ctx * ctx, const clip_image_f32 * img) {
                 int y_patch = img->ny() / (params.patch_size * 2);
                 n_patches = x_patch * y_patch;
             } break;
+        case PROJECTOR_TYPE_INKLING2V:
         case PROJECTOR_TYPE_STEP3VL:
             {
                 int x_patch = img->nx() / (params.patch_size * params.n_merge);
@@ -4582,6 +4611,19 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
 
     // set input per projector
     switch (ctx->model.proj_type) {
+        case PROJECTOR_TYPE_INKLING2V:
+            {
+                // CLS is at position 0, the patches are 1-indexed
+                std::vector<int32_t> positions_w{0}, positions_h{0};
+                for (int y = 0; y < pos_h; ++y) {
+                    for (int x = 0; x < pos_w; ++x) {
+                        positions_w.push_back(x + 1);
+                        positions_h.push_back(y + 1);
+                    }
+                }
+                set_input_i32("pos_w", positions_w);
+                set_input_i32("pos_h", positions_h);
+            } break;
         case PROJECTOR_TYPE_MUSE_GLIMMER:
             {
                 const int grid_w = pos_w;            // image_size_width  / patch_size
@@ -5935,6 +5977,7 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
             return ctx->model.mm_model_mlp_3_w->ne[1];
         case PROJECTOR_TYPE_MINIMAX_M3:
             return ctx->model.mm_merger_fc2_b->ne[0];
+        case PROJECTOR_TYPE_INKLING2V:
         case PROJECTOR_TYPE_MUSE_GLIMMER:
             return ctx->model.mm_2_w->ne[1];
         case PROJECTOR_TYPE_QWEN2VL:

@@ -88,7 +88,7 @@ struct common_chat_msg {
     // non-OpenAI message keys as a JSON object string, only for templates that read them (DeepSeek V4.1)
     std::string                               extra_json;
 
-    common_json to_json_oaicompat(bool concat_typed_text = false) const;
+    common_json to_json_oaicompat(bool concat_typed_text = false, bool preserve_media_parts = false) const;
 
     std::string render_content(const std::string & delimiter = "\n\n") const;
 
